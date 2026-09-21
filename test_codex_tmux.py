@@ -17,6 +17,97 @@ spec.loader.exec_module(m)
 
 
 class Tests(unittest.TestCase):
+    def test_final_screen_survives_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'runtime'
+            state.mkdir()
+            notice = 'Unrecognized final output\n  keep indentation\n\n'
+            with (state / 'exit-output.txt').open('w+') as output:
+                with patch.object(m, 'tmux', side_effect=['1', '']), \
+                     patch.object(m.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, notice)):
+                    m.cleanup(state, {'main_pane': '%0'})
+                self.assertFalse(state.exists())
+                self.assertEqual(output.read(), notice)
+
+    def test_capture_failure_still_cleans_up(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'runtime'
+            state.mkdir()
+            with patch.object(m, 'tmux', side_effect=[RuntimeError('missing pane'), '']) as command, \
+                 patch.object(m.traceback, 'print_exc'):
+                m.cleanup(state, {'main_pane': '%0'})
+            command.assert_called_with('kill-server', check=False)
+            self.assertFalse(state.exists())
+
+    def test_attached_exit_prints_arbitrary_output(self):
+        self.check_attached_exit_notice('Any final text, without a recognized marker.\n  그대로 출력\n')
+
+    def test_attached_exit_prints_notice(self):
+        self.check_attached_exit_notice(
+            'Token usage: total=123 input=100 output=23\n'
+            'To continue this session, run codex resume abc-123\n')
+
+    def test_attached_exit_prints_session_id_notice(self):
+        self.check_attached_exit_notice(
+            'Tip: Try the Desktop app on Linux: install it from '
+            'https://learn.chatgpt.com/docs/linux/linux-app\n'
+            "  and run 'chatgpt'.\n"
+            'Session ID: 01a0c21b-9701-7b82-a588-8cf66d60e9d3\n')
+
+    def check_attached_exit_notice(self, notice):
+        import pty
+        import select
+        import termios
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / 'fake-codex'
+            fake.write_text('''#!/usr/bin/env python3
+import pathlib, time
+print('OLD ANSWER', flush=True)
+while not pathlib.Path('stop').exists():
+    time.sleep(.025)
+''' + f'print({notice!r}, end="", flush=True)\n')
+            fake.chmod(0o755)
+            master, slave = pty.openpty()
+            termios.tcsetwinsize(slave, (24, 120))
+            env = dict(os.environ, TERM='xterm-256color', CODEX_HOME=directory)
+            env.pop('TMUX', None)
+            process = None
+            captured = bytearray()
+            try:
+                process = subprocess.Popen(
+                    [sys.executable, str(SCRIPT), directory, '--codex', str(fake)],
+                    stdin=slave, stdout=slave, stderr=slave, env=env)
+                deadline = time.monotonic() + 10
+                while b'OLD ANSWER' not in captured:
+                    self.assertLess(time.monotonic(), deadline, bytes(captured))
+                    if select.select([master], [], [], .1)[0]:
+                        captured.extend(os.read(master, 65536))
+                (root / 'stop').touch()
+                while process.poll() is None:
+                    self.assertLess(time.monotonic(), deadline, bytes(captured))
+                    if select.select([master], [], [], .1)[0]:
+                        captured.extend(os.read(master, 65536))
+                while select.select([master], [], [], .1)[0]:
+                    captured.extend(os.read(master, 65536))
+                self.assertEqual(process.returncode, 0, bytes(captured))
+                # These final plain lines must be outside tmux's alternate screen.
+                plain = bytes(captured).replace(b'\r\n', b'\n')
+                self.assertIn(notice.encode(), plain)
+                restored = plain.rsplit(b'\x1b[?1049l', 1)
+                self.assertEqual(len(restored), 2, plain)
+                self.assertIn(b'OLD ANSWER', restored[1])
+                # Screen text is replayed verbatim, with no content filtering.
+                self.assertIn(notice.encode(), restored[1])
+                self.assertNotIn(b'Pane is dead', restored[1])
+            finally:
+                (root / 'stop').touch()
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+                os.close(slave)
+                os.close(master)
+
     def event(self, used=250, limits=None, timestamp='2026-09-21T01:00:00Z'):
         return json.dumps({'timestamp': timestamp, 'type': 'event_msg', 'payload': {
             'type': 'token_count', 'info': {'last_token_usage': {'total_tokens': used},

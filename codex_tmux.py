@@ -135,9 +135,24 @@ def cleanup(state, settings):
     except (FileExistsError, FileNotFoundError):
         return
     try:
-        tmux('kill-server', check=False)
+        try:
+            # Pane EOF confirms tmux has consumed the CLI's final output.
+            deadline = time.monotonic() + 1
+            while tmux('display-message', '-p', '-t', settings['main_pane'], '#{pane_dead}') != '1':
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(.025)
+            screen = subprocess.run(
+                tmux_command('capture-pane', '-p', '-t', settings['main_pane']),
+                text=True, capture_output=True, check=True).stdout
+            (state / 'exit-output.txt').write_text(screen)
+        except Exception:
+            traceback.print_exc()
     finally:
-        shutil.rmtree(state, ignore_errors=True)
+        try:
+            tmux('kill-server', check=False)
+        finally:
+            shutil.rmtree(state, ignore_errors=True)
 
 
 def status_columns(settings):
@@ -197,15 +212,22 @@ def launch(args):
     SOCKET = str(state / 'tmux.sock')
     settings = {'cwd': str(cwd), 'codex': codex, 'socket': SOCKET,
                 'home': str(Path(os.environ.get('CODEX_HOME') or '~/.codex').expanduser().resolve())}
+    # Cleanup unlinks this file; the open handle retains the saved notice.
+    with (state / 'exit-output.txt').open('w+') as output:
+        launch_session(args, state, settings, output)
+
+
+def launch_session(args, state, settings, output):
     atomic_json(state / 'launch.json', settings)
     command = shlex.join([sys.executable, str(SELF), '_worker', str(state)])
     try:
         name = 'codex'
-        result = tmux('new-session', '-d', '-P', '-F', '#{window_id} #{pane_id} #{session_id}', '-s', name, '-n', 'codex', '-c', str(cwd), command)
+        result = tmux('new-session', '-d', '-P', '-F', '#{window_id} #{pane_id} #{session_id}', '-s', name, '-n', 'codex', '-c', settings['cwd'], command)
         target, main, session = result.split()
         settings.update(window=target, main_pane=main, session=session, state=str(state))
         atomic_json(state / 'launch.json', settings)
         tmux('set-option', '-w', '-t', target, 'remain-on-exit', 'on')
+        tmux('set-option', '-w', '-t', target, 'remain-on-exit-format', '')
         install_status(settings)
         with (state / 'watcher.log').open('a') as log:
             subprocess.Popen([sys.executable, str(SELF), '_watch', str(state)],
@@ -222,6 +244,10 @@ def launch(args):
         env = dict(os.environ)
         env.pop('TMUX', None)
         subprocess.call(tmux_command('attach-session', '-t', name), env=env)
+        output.seek(0)
+        notice = output.read()
+        if notice:
+            print(notice, end='', flush=True)
 
 
 def main():
