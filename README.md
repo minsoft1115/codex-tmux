@@ -21,10 +21,16 @@ Python 외부 패키지나 `codex-usage-bar` 설치는 필요하지 않습니다
 
 ## 설치
 
-프로젝트 폴더에서 실행합니다.
+GitHub에서 최신 소스를 받아 설치합니다. `curl`, `tar`가 추가로 필요하며 Git은
+필요하지 않습니다.
 
 ```bash
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/minsoft1115/codex-tmux/main/install-remote.sh | bash
+```
+
+설치 후 실행합니다.
+
+```bash
 codex-tmux                 # 현재 폴더에서 실행
 codex-tmux ~/my-project    # 특정 프로젝트에서 실행
 codex-tmux --detach        # 연결하지 않고 세션 생성
@@ -32,9 +38,27 @@ codex-tmux --detach        # 연결하지 않고 세션 생성
 
 `~/.local/share/codex-tmux/`에 프로그램을 복사하고 `~/.local/bin/codex-tmux`를
 실행 파일로 등록합니다. Bash alias 없이 다른 셸에서도 사용할 수 있으며,
-원본 프로젝트 폴더를 이동해도 설치된 명령은 유지됩니다. 업데이트는 최신 소스에서
-`./install.sh`를 다시 실행하면 됩니다. Python 외부 패키지는 설치하지 않습니다.
+원본 프로젝트 폴더를 이동해도 설치된 명령은 유지됩니다. 업데이트는 위 설치 명령을
+다시 실행하면 됩니다. Python 외부 패키지는 설치하지 않습니다.
 `~/.local/bin`이 PATH에 없으면 설치 출력에 나오는 PATH 설정을 적용하세요.
+
+설치 옵션은 `bash -s --` 뒤에 전달합니다.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/minsoft1115/codex-tmux/main/install-remote.sh | bash -s -- --prefix "$HOME/.local"
+```
+
+원격 설치기는 소스 압축파일을 임시 폴더에 내려받아 기존 `install.sh`를 실행하고,
+종료 시 임시 폴더를 정리합니다. 다운로드나 압축 해제가 실패하면 설치를 중단합니다.
+기본 소스는 `main`이며, `CODEX_TMUX_REF`로 태그 또는 커밋을 지정할 수 있습니다.
+설치기와 소스를 모두 고정하려면 아래 `COMMIT_SHA`를 같은 실제 커밋 ID로 바꾸세요
+(해당 커밋에 `install-remote.sh`가 있어야 합니다).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/minsoft1115/codex-tmux/COMMIT_SHA/install-remote.sh | CODEX_TMUX_REF=COMMIT_SHA bash
+```
+
+이미 저장소를 내려받았다면 프로젝트 폴더에서 `./install.sh`로 설치할 수도 있습니다.
 
 이전 설치기가 `.bashrc`에 등록한 관리 블록은 백업 후 제거합니다. 이미 열린
 Bash에는 이전 alias가 남을 수 있으므로 한 번 실행하세요.
@@ -117,7 +141,7 @@ python3 codex_tmux.py /프로젝트/경로 --codex /절대/경로/codex
 python3 codex_tmux.py /프로젝트/경로 --detach
 
 # 외부 모듈 및 API 요청 없이 테스트
-python3 -B -m unittest -v test_codex_tmux
+python3 -B -m unittest -v test_codex_tmux test_install_remote
 ```
 
 테스트는 로그 증분 읽기·손상·교체·삭제, 세션별 context와 전체 한도 분리,
@@ -125,3 +149,5 @@ python3 -B -m unittest -v test_codex_tmux
 모의 Codex와 임시 tmux 서버로 tmux 안팎 실행의 서버 격리, 단일 pane,
 기존 서버 설정 유지, Ctrl+C 및 정상 종료 후 정리도 검증합니다.
 실제 Codex의 훅 신뢰 UI는 자동 테스트 범위에 포함하지 않습니다.
+원격 설치 테스트는 다운로드를 로컬 압축파일로 대체하여 옵션 전달, 재설치,
+이전 alias 정리, 다운로드·압축 해제·설치 실패와 임시 폴더 정리를 검증합니다.
