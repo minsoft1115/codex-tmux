@@ -42,6 +42,9 @@ class Tests(unittest.TestCase):
     def test_attached_exit_prints_arbitrary_output(self):
         self.check_attached_exit_notice('Any final text, without a recognized marker.\n  그대로 출력\n')
 
+    def test_attached_exit_preserves_color(self):
+        self.check_attached_exit_notice('\x1b[31mColored exit message\x1b[39m\n')
+
     def test_attached_exit_prints_notice(self):
         self.check_attached_exit_notice(
             'Token usage: total=123 input=100 output=23\n'
@@ -76,8 +79,8 @@ while not pathlib.Path('stop').exists():
             captured = bytearray()
             try:
                 process = subprocess.Popen(
-                    [sys.executable, str(SCRIPT), directory, '--codex', str(fake)],
-                    stdin=slave, stdout=slave, stderr=slave, env=env)
+                    [sys.executable, str(SCRIPT), '--codex', str(fake)],
+                    stdin=slave, stdout=slave, stderr=slave, env=env, cwd=directory)
                 deadline = time.monotonic() + 10
                 while b'OLD ANSWER' not in captured:
                     self.assertLess(time.monotonic(), deadline, bytes(captured))
@@ -263,6 +266,67 @@ while not pathlib.Path('stop').exists():
             subprocess.run([sys.executable, '-c', code, str(SCRIPT), payload], env=env, check=True)
             self.assertFalse((state / 'session.json').exists())
 
+    def test_session_start_switches_context_without_resetting_account_usage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / 'process.json').write_text(json.dumps({'pid': os.getpid()}))
+            env = dict(os.environ, CODEX_TMUX_RUN=directory)
+            sessions = state / 'sessions'
+            sessions.mkdir()
+            old_id = str(uuid.uuid4())
+            old_log = sessions / 'old.jsonl'
+            old_log.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': old_id}})
+                               + '\n' + self.event(used=700, limits={
+                                   'primary': {'window_minutes': 300, 'used_percent': 35},
+                                   'secondary': {'window_minutes': 10080, 'used_percent': 12}}))
+            reader = m.LogReader(directory)
+
+            def capture(sid, event='SessionStart', source='clear', path=None, nested=False):
+                payload = json.dumps({'session_id': sid, 'hook_event_name': event,
+                                      'source': source, 'transcript_path': path})
+                command = [sys.executable, str(SCRIPT), '_capture']
+                if nested:
+                    code = ('import subprocess,sys; subprocess.run('
+                            '[sys.executable,sys.argv[1],"_capture"],input=sys.argv[2],'
+                            'text=True,check=True)')
+                    command = [sys.executable, '-c', code, str(SCRIPT), payload]
+                subprocess.run(command, env=env, input=payload, text=True, check=True)
+
+            def mapping():
+                return json.loads((state / 'session.json').read_text())
+
+            capture(old_id, source='startup', path=str(old_log))
+            self.assertEqual(reader.read(old_id)['context'], 70)
+            for source in ('clear', 'startup', 'resume', 'compact'):
+                new_id = str(uuid.uuid4())
+                capture(new_id, source=source)
+                self.assertEqual(mapping(), {'session_id': new_id, 'transcript_path': None})
+                data = reader.read(new_id)
+                self.assertIsNone(data['context'])
+                self.assertEqual(data['limits'], {300: 35, 10080: 12})
+                self.assertIn('wait', m.render_status(data, new_id, 120))
+                # Late old prompts, unsupported sources and nested CLIs cannot take ownership.
+                capture(old_id, event='UserPromptSubmit', path=str(old_log))
+                capture(old_id, source='unsupported', path=str(old_log))
+                capture(old_id, nested=True, path=str(old_log))
+                self.assertEqual(mapping()['session_id'], new_id)
+
+                new_log = sessions / (new_id + '.jsonl')
+                capture(new_id, event='UserPromptSubmit', path=str(new_log))
+                capture(new_id, event='UserPromptSubmit')
+                self.assertEqual(mapping()['transcript_path'], str(new_log))
+                new_log.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': new_id}})
+                                   + '\n' + self.event(used=50))
+                data = reader.read(new_id, str(new_log))
+                self.assertEqual(data['context'], 5)
+                self.assertEqual(data['limits'], {300: 35, 10080: 12})
+                old_id, old_log = new_id, new_log
+
+            next_id = str(uuid.uuid4())
+            next_log = str(sessions / 'next.jsonl')
+            capture(next_id, path=next_log)
+            self.assertEqual(mapping(), {'session_id': next_id, 'transcript_path': next_log})
+
     def test_tmux_isolation_and_cleanup(self):
         with tempfile.TemporaryDirectory(prefix='codex-tmux-test-') as directory:
             root = Path(directory)
@@ -302,7 +366,7 @@ while not (pathlib.Path(os.environ['CODEX_HOME']) / 'stop').exists():
                 for iteration in range(2):
                     if iteration == 1:
                         env.pop('TMUX', None)
-                    result = subprocess.run([sys.executable, str(SCRIPT), str(root), '--codex', str(fake), '--detach'], env=env, text=True, capture_output=True)
+                    result = subprocess.run([sys.executable, str(SCRIPT), '--codex', str(fake), '--detach'], env=env, text=True, capture_output=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     states.append(Path(result.stdout.split('runtime: ')[1].strip()))
                 deadline = time.monotonic() + 15
