@@ -4,6 +4,8 @@ import argparse
 import fcntl
 import json
 import os
+import re
+import select
 import traceback
 from pathlib import Path
 import shlex
@@ -13,8 +15,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import tomllib
+import tty
 import uuid
 
 from usage import LogReader, render_status, display_options
@@ -298,11 +302,63 @@ def exec_codex(state):
             if not state.exists() or not process_alive(read_json(state / 'worker.json')):
                 return
             settings = read_json(state / 'launch.json')
+            if settings.get('wait_for_client') and not client_connected(settings):
+                return
             atomic_json(state / 'process.json', process_identity(os.getpid()))
             (state / 'started').touch()
     except FileNotFoundError:
         return
     os.execv(settings['codex'], [settings['codex'], *settings['argv']])
+
+
+def client_connected(settings):
+    return bool(tmux('list-clients', '-t', settings['session'], '-F', '#{client_name}'))
+
+
+def probe_palette(state):
+    """Query in a separate, unselected window so prompt input is never consumed."""
+    original = termios.tcgetattr(0)
+    found = set()
+    data = b''
+    try:
+        tty.setraw(0, termios.TCSANOW)
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and found != {b'10', b'11'}:
+            os.write(1, b'\x1b]10;?\x1b\\\x1b]11;?\x1b\\')
+            if select.select([0], [], [], .05)[0]:
+                chunk = os.read(0, 4096)
+                if not chunk:
+                    break
+                data = (data + chunk)[-8192:]
+                found.update(re.findall(
+                    rb'\x1b\](10|11);rgb:[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}/'
+                    rb'[0-9a-fA-F]{1,4}(?:\x07|\x1b\\)', data))
+    finally:
+        termios.tcsetattr(0, termios.TCSANOW, original)
+    atomic_json(state / 'palette.json', {'available': found == {b'10', b'11'}})
+
+
+def prepare_terminal(state, settings):
+    deadline = time.monotonic() + 10
+    while not client_connected(settings):
+        if not process_alive(settings.get('launcher')) or time.monotonic() >= deadline:
+            raise ValueError('Terminal did not attach during startup.')
+        time.sleep(.025)
+    # tmux caches the client's OSC replies. Probe through another window, leaving
+    # the main pane's terminal modes and queued keystrokes entirely untouched.
+    command = shlex.join([sys.executable, str(SELF), '_palette', str(state)])
+    window = tmux('new-window', '-d', '-P', '-F', '#{window_id}',
+                  '-t', settings['session'] + ':', '-n', 'palette', command)
+    try:
+        deadline = time.monotonic() + 2
+        while not (state / 'palette.json').exists() and time.monotonic() < deadline:
+            if not client_connected(settings):
+                raise ValueError('Terminal disconnected during startup.')
+            time.sleep(.025)
+        if not client_connected(settings):
+            raise ValueError('Terminal disconnected during startup.')
+    finally:
+        tmux('kill-window', '-t', window, check=False)
 
 
 def worker(state):
@@ -315,13 +371,15 @@ def worker(state):
     settings = json.loads((state / 'launch.json').read_text())
     env = dict(os.environ, CODEX_TMUX_RUN=str(state), CODEX_HOME=settings['home'])
     print('Status bar: context connects on the first prompt. Review /hooks if still unlinked afterward.', flush=True)
-    # Codex owns Ctrl+C. The supervisor must wait for its actual exit, rather
-    # than being interrupted along with the child by a terminal SIGINT.
-    signal.signal(signal.SIGINT, lambda *_: None)
     try:
-        # Establish supervision before Codex can start. The launcher remains
-        # responsible until started is published, including watcher spawn failure.
+        # Establish supervision before announcing readiness to attach. Detached
+        # launchers additionally wait for Codex's process registration.
         watcher = start_watcher(state)
+        (state / 'prepared').touch()
+        if settings.get('wait_for_client'):
+            prepare_terminal(state, settings)
+        # Once Codex starts, it owns Ctrl+C. During preparation it cancels startup.
+        signal.signal(signal.SIGINT, lambda *_: None)
         process = subprocess.Popen([sys.executable, str(SELF), '_exec', str(state)], env=env)
         while process.poll() is None:
             if watcher.poll() is not None:
@@ -503,6 +561,7 @@ def launch(args):
     state = Path(tempfile.mkdtemp(prefix='codex-tmux-'))
     SOCKET = str(state / 'tmux.sock')
     settings = {'runtime_version': 2, 'launcher': process_identity(os.getpid()),
+                'wait_for_client': not args.detach,
                 'state': str(state), 'cwd': str(cwd), 'codex': codex, 'socket': SOCKET, 'argv': argv,
                 'home': str(Path(os.environ.get('CODEX_HOME') or '~/.codex').expanduser().resolve())}
     # Cleanup unlinks this file; the open handle retains the saved notice.
@@ -528,14 +587,15 @@ def launch_session(args, state, settings, output):
         pane_process = process_identity(int(tmux('display-message', '-p', '-t', main, '#{pane_pid}')))
         (state / 'ready').touch()
         deadline = time.monotonic() + 10
-        while state.exists() and not (state / 'started').exists():
+        milestone = 'started' if args.detach else 'prepared'
+        while state.exists() and not (state / milestone).exists():
             identity = read_json(state / 'worker.json') or pane_process
             if not process_alive(identity):
                 raise ValueError('Codex worker exited during startup.')
             if time.monotonic() >= deadline:
                 raise ValueError('Codex worker did not finish startup.')
             time.sleep(.025)
-    except Exception:
+    except BaseException:
         cleanup(state, settings)
         raise
     if not state.exists():
@@ -547,7 +607,16 @@ def launch_session(args, state, settings, output):
     else:
         env = dict(os.environ)
         env.pop('TMUX', None)
-        subprocess.call(tmux_command('attach-session', '-t', name), env=env)
+        try:
+            result = subprocess.call(tmux_command('attach-session', '-t', name), env=env)
+        finally:
+            startup_incomplete = state.exists() and not (state / 'started').exists()
+            if startup_incomplete:
+                cleanup(state, settings)
+        # kill-server also makes an attached tmux client return nonzero on a
+        # normal Codex exit; only treat a failed initial attach as an error.
+        if result and startup_incomplete:
+            raise ValueError('Could not attach to the Codex terminal.')
         output.seek(0)
         notice = output.read()
         if notice:
@@ -559,14 +628,16 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == '_capture':
         capture()
         return
-    if len(sys.argv) == 3 and sys.argv[1] in ('_worker', '_watch', '_cleanup', '_exec'):
+    if len(sys.argv) == 3 and sys.argv[1] in ('_worker', '_watch', '_cleanup', '_exec', '_palette'):
         state = Path(sys.argv[2])
         try:
             settings = json.loads((state / 'launch.json').read_text())
         except FileNotFoundError:
             return
         SOCKET = settings.get('socket')
-        if sys.argv[1] == '_exec':
+        if sys.argv[1] == '_palette':
+            probe_palette(state)
+        elif sys.argv[1] == '_exec':
             exec_codex(state)
         elif sys.argv[1] == '_cleanup':
             cleanup(state, settings)
@@ -593,6 +664,8 @@ def main():
     args.argv = sys.argv[boundary:]
     try:
         launch(args)
+    except KeyboardInterrupt:
+        parser.exit(130)
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
         detail = error.stderr if isinstance(error, subprocess.CalledProcessError) else str(error)
         parser.exit(1, f'Error: {detail}\n')
