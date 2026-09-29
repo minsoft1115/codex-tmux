@@ -127,7 +127,8 @@ while not pathlib.Path('stop').exists():
             other.write_text(self.event(900, {'primary': {'window_minutes': 300, 'used_percent': 17}}, '2026-09-21T02:00:00Z'))
             reader = m.LogReader(home)
             data = reader.read('selected', str(selected))
-            self.assertEqual(data, {'context': 25, 'limits': {300: 17, 10080: 42}})
+            self.assertEqual(data, {'context': 25, 'context_used': 250, 'context_window': 1000,
+                                    'limits': {300: 17, 10080: 42}})
             self.assertIsNone(reader.read()['context'])
             self.assertIsNone(reader.read('wrong', str(selected))['context'])
             # Unchanged files are not reopened.
@@ -140,6 +141,7 @@ while not pathlib.Path('stop').exists():
             with selected.open('a') as stream:
                 stream.write(appended[-2:])
             self.assertEqual(reader.read('selected')['context'], 50)
+            self.assertEqual(reader.read('selected')['context_used'], 500)
             other.unlink()
             self.assertNotIn(300, reader.read('selected')['limits'])
             selected.write_text(meta + self.event(100))
@@ -148,6 +150,48 @@ while not pathlib.Path('stop').exists():
             replacement.write_text(meta + self.event(800))
             replacement.replace(selected)
             self.assertEqual(reader.read('selected')['context'], 80)
+            self.assertEqual(reader.read('selected')['context_used'], 800)
+
+    def test_context_counts_and_width_fallback(self):
+        import re
+        from usage import LogReader
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'log.jsonl'
+            record = json.loads(self.event(155000))
+            record['payload']['info']['model_context_window'] = 258000
+            record['payload']['info']['total_token_usage'] = {'total_tokens': 9999999}
+            path.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': 'selected'}})
+                            + '\n' + json.dumps(record) + '\n')
+            reader = LogReader(directory)
+            data = reader.read('selected', str(path))
+            self.assertAlmostEqual(data['context'], 155000 / 258000 * 100)
+            wide = m.render_status(data, 'selected', 120, color=False)
+            self.assertIn('60% (155K / 258K)', wide)
+            self.assertNotIn('9.99M', wide)
+            plain_data = {'context': data['context'], 'limits': data['limits']}
+            for width in range(1, 201):
+                rendered = m.render_status(data, 'selected', width)
+                plain = re.sub(r'#\[[^]]*\]', '', rendered)
+                self.assertLessEqual(len(plain), width)
+                if '(' in plain:
+                    self.assertIn('(155K / 258K)', plain)
+                else:
+                    self.assertEqual(rendered, m.render_status(plain_data, 'selected', width))
+            self.assertNotIn('(', m.render_status(data, 'selected', 60))
+            self.assertIn('(155K / 258K)', m.render_status(data, 'selected', 80, bar_width=0))
+            self.assertIsNone(reader.read('other', str(path))['context_used'])
+            self.assertIsNone(reader.read('other', str(path))['context_window'])
+
+    def test_context_token_units_and_invalid_samples(self):
+        from usage import context_usage, format_tokens
+        for value, expected in ((0, '0'), (999, '999'), (1500, '1.5K'),
+                                (13700, '13.7K'), (155000, '155K'), (258000, '258K'),
+                                (1000000, '1M')):
+            self.assertEqual(format_tokens(value), expected)
+        for used, window in ((None, 1000), (True, 1000), (-1, 1000),
+                             (float('nan'), 1000), (100, 0), (100, float('inf'))):
+            self.assertIsNone(context_usage({'info': {'last_token_usage': {'total_tokens': used},
+                                                     'model_context_window': window}}))
 
     def test_invalid_values_and_latest_limits(self):
         with tempfile.TemporaryDirectory() as directory:

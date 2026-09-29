@@ -16,14 +16,15 @@ def number(value):
         return None
 
 
-def context_percent(payload):
+def context_usage(payload):
     info = payload.get('info')
     if not isinstance(info, dict):
         return None
     usage = info.get('last_token_usage')
     window = number(info.get('model_context_window'))
     used = number(usage.get('total_tokens')) if isinstance(usage, dict) else None
-    return number(used / window * 100) if used is not None and window else None
+    percent = number(used / window * 100) if used is not None and window else None
+    return (percent, used, window) if percent is not None else None
 
 
 class LogReader:
@@ -49,7 +50,10 @@ class LogReader:
             for minutes, entry in cache['limits'].items():
                 if minutes not in limits or entry[0] > limits[minutes][0]:
                     limits[minutes] = entry
-        return {'context': context, 'limits': {key: entry[1] for key, entry in limits.items()}}
+        return {'context': context[0] if context else None,
+                'context_used': context[1] if context else None,
+                'context_window': context[2] if context else None,
+                'limits': {key: entry[1] for key, entry in limits.items()}}
 
     def _update(self, path):
         try:
@@ -90,7 +94,7 @@ class LogReader:
                         # Undated events cannot outrank timestamped events.
                         stamp = 0
                     order = (stamp, str(path), cache['offset'])
-                    value = context_percent(payload)
+                    value = context_usage(payload)
                     if value is not None and (cache['context'] is None or order > cache['context'][0]):
                         cache['context'] = order, value
                     rates = payload.get('rate_limits')
@@ -111,6 +115,16 @@ class LogReader:
             self.files.pop(path, None)
 
 
+def format_tokens(value):
+    for scale, suffix in ((1e12, 'T'), (1e9, 'B'), (1e6, 'M'), (1e3, 'K')):
+        if value >= scale:
+            scaled = value / scale
+            decimals = 2 if scaled < 10 else 1 if scaled < 100 else 0
+            text = f'{scaled:.{decimals}f}'
+            return (text.rstrip('0').rstrip('.') if decimals else text) + suffix
+    return f'{value:.0f}'
+
+
 def render_status(data, sid, columns, color=True, bar_width=10, lang='en'):
     """Keep three segmented gauges visible, coloring only their filled cells."""
     columns = max(0, columns)
@@ -121,6 +135,16 @@ def render_status(data, sid, columns, color=True, bar_width=10, lang='en'):
     if values[0] is None:
         texts[0] = 'wait' if sid else 'prompt'
     identity = sid[:8] if sid else 'Codex'
+    used, window = number(data.get('context_used')), number(data.get('context_window'))
+    if values[0] is not None and used is not None and window:
+        detail = f' ({format_tokens(used)} / {format_tokens(window)})'
+        base = ' ' + identity + ' | ' + ' | '.join(
+            label + ': ' + text for label, text in zip(labels, texts))
+        preferred_width = min(40, max(0, bar_width))
+        gauge_space = 3 * (preferred_width + 1) if preferred_width >= 2 else 0
+        # Supplemental counts yield before gauges, identity, or spacing do.
+        if len(base) + len(detail) + gauge_space <= columns:
+            texts[0] += detail
     # Prefer keeping all three segmented gauges over the session ID and spacing.
     layouts = [(' ' + identity + ' | ', ' | ', ': '), (' ', ' | ', ': '), ('', ' ', ':')]
     for prefix, separator, colon in layouts:
