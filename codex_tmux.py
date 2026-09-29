@@ -432,6 +432,14 @@ def install_scrolling(settings):
         tmux('bind-key', '-T', table, 'Escape', 'send-keys', '-X', 'cancel')
 
 
+def disable_prefix_bindings(settings):
+    """Disable tmux command prefixes in this run's private server only."""
+    session = settings['session']
+    tmux('set-option', '-t', session, 'prefix', 'None')
+    tmux('set-option', '-t', session, 'prefix2', 'None')
+    tmux('unbind-key', '-a', '-T', 'prefix')
+
+
 def cleanup(state, settings):
     # flock is released by the kernel even if the cleanup owner is SIGKILLed.
     try:
@@ -556,6 +564,9 @@ def launch(args):
         os.execv(codex, [codex, *args.argv])
     if not shutil.which('tmux'):
         raise ValueError('tmux must be installed.')
+    # Herdr otherwise sees the nested tmux client as the foreground process.
+    # This is scoped to this wrapper process and its children, not the shell.
+    os.environ['HERDR_AGENT'] = 'codex'
     reap_stale_runs()
     argv = with_connection_hooks(args.argv)
     state = Path(tempfile.mkdtemp(prefix='codex-tmux-'))
@@ -582,6 +593,7 @@ def launch_session(args, state, settings, output):
         tmux('set-option', '-w', '-t', target, 'remain-on-exit', 'on')
         tmux('set-option', '-w', '-t', target, 'remain-on-exit-format', '')
         install_status(settings)
+        disable_prefix_bindings(settings)
         install_scrolling(settings)
         tmux('select-pane', '-t', main)
         pane_process = process_identity(int(tmux('display-message', '-p', '-t', main, '#{pane_pid}')))

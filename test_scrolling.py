@@ -63,8 +63,12 @@ while True:
                 try:
                     launcher.tmux('new-session', '-d', '-s', 'test', '-c', directory,
                                   'python3 ' + shlex.quote(str(program)))
+                    launcher.disable_prefix_bindings({'session': 'test'})
                     launcher.install_scrolling({'session': 'test'})
                     self.assertEqual(launcher.tmux('show-options', '-v', '-t', 'test', 'mouse'), 'on')
+                    self.assertEqual(launcher.tmux('show-options', '-v', '-t', 'test', 'prefix'), 'None')
+                    self.assertEqual(launcher.tmux('show-options', '-v', '-t', 'test', 'prefix2'), 'None')
+                    self.assertEqual(launcher.tmux('list-keys', '-T', 'prefix', check=False), '')
                     client = subprocess.Popen(
                         launcher.tmux_command('attach-session', '-t', 'test'),
                         stdin=slave, stdout=slave, stderr=slave, env=env)

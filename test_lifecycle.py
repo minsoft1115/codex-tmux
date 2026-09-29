@@ -32,7 +32,11 @@ class LifecycleTests(unittest.TestCase):
         self.fake = self.root / 'fake-codex'
         self.fake.write_text('''#!/usr/bin/env python3
 import os, pathlib, signal, time
+import json
 # Also exercise orphan cleanup when Codex ignores terminal hangup.
+pathlib.Path(os.environ['CODEX_HOME'], 'herdr-agent').write_text(os.environ.get('HERDR_AGENT', 'unset'))
+pathlib.Path(os.environ['CODEX_HOME'], 'herdr-context.json').write_text(json.dumps({
+    key: os.environ.get(key) for key in ('HERDR_ENV', 'HERDR_SOCKET_PATH', 'HERDR_PANE_ID')}))
 signal.signal(signal.SIGHUP, signal.SIG_IGN)
 print('fake running', flush=True)
 while not (pathlib.Path(os.environ['CODEX_HOME']) / 'stop').exists():
@@ -50,14 +54,20 @@ while not (pathlib.Path(os.environ['CODEX_HOME']) / 'stop').exists():
     def launch(self):
         # Keep startup garbage collection confined to this test's runtimes.
         env = dict(os.environ, CODEX_HOME=str(self.root), TMPDIR=str(self.root),
-                   PATH=str(self.bin) + ':' + os.environ['PATH'])
+                   PATH=str(self.bin) + ':' + os.environ['PATH'], HERDR_AGENT='outer-value',
+                   HERDR_ENV='1', HERDR_SOCKET_PATH='/tmp/herdr-test.sock', HERDR_PANE_ID='w1:p1')
         result = subprocess.run([sys.executable, str(m.SELF), '--detach', '--codex', str(self.fake)],
                                 env=env, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         state = Path(result.stdout.split('runtime: ')[1].strip())
         self.states.append(state)
         self.wait(lambda: (state / 'watcher.json').exists())
+        self.wait(lambda: (self.root / 'herdr-agent').exists())
+        self.wait(lambda: (self.root / 'herdr-context.json').exists())
         settings = m.read_json(state / 'launch.json')
+        self.assertEqual((self.root / 'herdr-agent').read_text(), 'codex')
+        self.assertEqual(json.loads((self.root / 'herdr-context.json').read_text()), {
+            'HERDR_ENV': '1', 'HERDR_SOCKET_PATH': '/tmp/herdr-test.sock', 'HERDR_PANE_ID': 'w1:p1'})
         identities = {name: m.read_json(state / (name + '.json')) for name in ('worker', 'watcher', 'process')}
         identities['server'] = settings['server']
         return state, settings, identities

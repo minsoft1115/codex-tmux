@@ -60,6 +60,13 @@ Bash alias가 적용돼 있으면 `codex`로도 동일하게 실행할 수 있�
 짧은 대기 후 그대로 실행합니다. `--detach`는 연결 없이 시작하므로 입력창 배경색이
 표시되지 않을 수 있습니다.
 
+실행마다 사용하는 전용 tmux 서버에서는 tmux 접두키 단축키를 비활성화합니다.
+Herdr 안에서 실행하면 해당 codex-tmux 프로세스에만 `HERDR_AGENT=codex`를 설정해
+Herdr가 중첩된 tmux 클라이언트를 Codex로 인식하도록 돕습니다. Herdr의 Codex 연동은
+세션 ID 전달용이며, 설치하지 않아도 에이전트 인식과 화면 기반 상태 판정은 별도로
+동작합니다. Herdr의 Codex 연동을 설치하려면 `herdr integration install codex`를
+실행하세요.
+
 ## 사용량 표시
 
 상태줄은 세션 ID 앞 8자리, context 사용률, 5시간·7일 사용 한도를 표시하고
