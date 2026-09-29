@@ -30,6 +30,10 @@ while True:
         os.write(1, b'\\x1b[?1049h')
     elif data == b'@':
         os.write(1, b'\\x1b[?1049l')
+    elif data == b'%':
+        os.write(1, b'\\x1b[?1000h\\x1b[?1006h')
+    elif data == b'^':
+        os.write(1, b'\\x1b[?1000l\\x1b[?1006l')
     else:
         with open('received', 'ab') as stream:
             stream.write(data)
@@ -106,15 +110,45 @@ while True:
                     self.assertEqual(received.read_bytes(), expected)
                     self.assertEqual(state('#{pane_in_mode}'), '0')
 
-                    # Explicit copy mode takes precedence even over an alternate screen.
+                    # Native mouse support must bypass the legacy arrow translation.
+                    launcher.tmux('send-keys', '-t', 'test', '%')
+                    wait_for(lambda: state('#{mouse_any_flag}') == '1')
+                    wheel = b'\x1b[<64;10;10M\x1b[<65;10;10M'
+                    press(wheel)
+                    expected += wheel
+                    wait_for(lambda: len(received.read_bytes()) >= len(expected))
+                    self.assertEqual(received.read_bytes(), expected)
+                    self.assertEqual(state('#{pane_in_mode}'), '0')
+
+                    # Explicit copy mode takes precedence even with native mouse enabled.
                     launcher.tmux('copy-mode', '-t', 'test')
                     press(b'\x1b[5~\x1b[<64;10;10M\x1b')
                     wait_for(lambda: state('#{pane_in_mode}') == '0')
                     press(b'z')
                     wait_for(lambda: received.read_bytes().endswith(b'z'))
                     self.assertEqual(received.read_bytes(), expected + b'z')
+                    expected += b'z'
+
+                    # Disabling native mouse restores legacy alternate-screen navigation.
+                    launcher.tmux('send-keys', '-t', 'test', '^')
+                    wait_for(lambda: state('#{mouse_any_flag}') == '0')
+                    press(wheel)
+                    expected += b'\x1b[A\x1b[B'
+                    wait_for(lambda: len(received.read_bytes()) >= len(expected))
+                    self.assertEqual(received.read_bytes(), expected)
                     launcher.tmux('send-keys', '-t', 'test', '@')
                     wait_for(lambda: state('#{alternate_on}') == '0')
+
+                    # Native mouse also wins on inline screens; detection is not version-based.
+                    launcher.tmux('send-keys', '-t', 'test', '%')
+                    wait_for(lambda: state('#{mouse_any_flag}') == '1')
+                    press(wheel)
+                    expected += wheel
+                    wait_for(lambda: len(received.read_bytes()) >= len(expected))
+                    self.assertEqual(received.read_bytes(), expected)
+                    self.assertEqual(state('#{pane_in_mode}'), '0')
+                    launcher.tmux('send-keys', '-t', 'test', '^')
+                    wait_for(lambda: state('#{mouse_any_flag}') == '0')
                     press(b'\x1b[5~')
                     wait_for(lambda: state('#{pane_in_mode}') == '1')
                 finally:

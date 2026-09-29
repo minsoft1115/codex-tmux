@@ -406,15 +406,15 @@ def install_status(settings):
 
 
 def install_scrolling(settings):
-    """Keep inline history in tmux; route alternate-screen input to Codex."""
+    """Honor native mouse handling; provide scrolling for keyboard-only screens."""
     tmux('set-option', '-t', settings['session'], 'mouse', 'on')
     # Mouse targets follow the event; keyboard targets follow the active pane.
     tmux('bind-key', '-T', 'root', 'WheelUpPane',
-         'if-shell', '-F', '-t', '=', '#{pane_in_mode}', 'send-keys -M',
+         'if-shell', '-F', '-t', '=', '#{||:#{pane_in_mode},#{mouse_any_flag}}', 'send-keys -M',
          'if-shell -F -t = "#{alternate_on}" "send-keys -t = Up" '
          '"copy-mode -e -t =; send-keys -t = -X -N 5 scroll-up"')
     tmux('bind-key', '-T', 'root', 'WheelDownPane',
-         'if-shell', '-F', '-t', '=', '#{pane_in_mode}', 'send-keys -M',
+         'if-shell', '-F', '-t', '=', '#{||:#{pane_in_mode},#{mouse_any_flag}}', 'send-keys -M',
          'if-shell -F -t = "#{alternate_on}" "send-keys -t = Down"')
     tmux('bind-key', '-T', 'root', 'PPage',
          'if-shell', '-F', '#{alternate_on}', 'send-keys PPage', 'copy-mode -e -u')
