@@ -64,6 +64,7 @@ while True:
                     launcher.tmux('new-session', '-d', '-s', 'test', '-c', directory,
                                   'python3 ' + shlex.quote(str(program)))
                     launcher.disable_prefix_bindings({'session': 'test'})
+                    launcher.install_input_bindings()
                     launcher.install_scrolling({'session': 'test'})
                     self.assertEqual(launcher.tmux('show-options', '-v', '-t', 'test', 'mouse'), 'on')
                     self.assertEqual(launcher.tmux('show-options', '-v', '-t', 'test', 'prefix'), 'None')
@@ -153,6 +154,13 @@ while True:
                     self.assertEqual(state('#{pane_in_mode}'), '0')
                     launcher.tmux('send-keys', '-t', 'test', '^')
                     wait_for(lambda: state('#{mouse_any_flag}') == '0')
+                    # Exercise terminal bytes, not send-keys: tmux must retain
+                    # Shift and forward Shift+Enter as CSI-u, not Alt+Enter.
+                    for encoded in (b'\x1b[13;2u', b'\x1b[27;2;13~'):
+                        press(encoded + b'\x1b\r\rz')
+                        expected += b'\x1b[13;2u\x1b\r\rz'
+                        wait_for(lambda: len(received.read_bytes()) >= len(expected))
+                        self.assertEqual(received.read_bytes(), expected)
                     press(b'\x1b[5~')
                     wait_for(lambda: state('#{pane_in_mode}') == '1')
                 finally:

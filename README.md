@@ -20,6 +20,11 @@ curl -fsSL https://raw.githubusercontent.com/minsoft1115/codex-tmux/main/install
 설치됩니다. `~/.local/bin`이 PATH에 없으면 설치 안내에 따라 추가하세요.
 저장소를 내려받은 경우에는 `./install.sh`로 설치할 수도 있습니다.
 
+설치 시 `${CODEX_HOME:-~/.codex}/config.toml`의 `tui.keymap.editor.insert_newline`을
+갱신해 Alt+Enter 대신 Shift+Enter를 줄바꿈 키로 사용합니다. 다른 줄바꿈 키와
+기존 설정은 유지하며, 변경 전 설정을 백업합니다. 실행 중인 Codex의 키 설정과
+단축키 안내에는 재시작 후 반영됩니다.
+
 설치기는 `.bashrc`를 백업하고 `codex`를 `codex-tmux`로 연결하는 alias를 등록합니다.
 새 Bash를 열거나 현재 셸에서 다음을 실행하세요.
 
@@ -61,6 +66,9 @@ Bash alias가 적용돼 있으면 `codex`로도 동일하게 실행할 수 있�
 표시되지 않을 수 있습니다.
 
 실행마다 사용하는 전용 tmux 서버에서는 tmux 접두키 단축키를 비활성화합니다.
+Shift+Enter는 Shift 정보를 보존하는 CSI-u 입력으로 Codex에 전달합니다.
+터미널이 Shift+Enter를 일반 Enter와 구분해서 보내도록 설정되어 있어야 합니다.
+
 Herdr 안에서 실행하면 해당 codex-tmux 프로세스에만 `HERDR_AGENT=codex`를 설정해
 Herdr가 중첩된 tmux 클라이언트를 Codex로 인식하도록 돕습니다. Herdr의 Codex 연동은
 세션 ID 전달용이며, 설치하지 않아도 에이전트 인식과 화면 기반 상태 판정은 별도로

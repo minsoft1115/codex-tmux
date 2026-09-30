@@ -432,6 +432,11 @@ def install_scrolling(settings):
         tmux('bind-key', '-T', table, 'Escape', 'send-keys', '-X', 'cancel')
 
 
+def install_input_bindings():
+    """Preserve Shift+Enter as CSI-u instead of losing Shift in legacy encoding."""
+    tmux('bind-key', '-T', 'root', 'S-Enter', 'send-keys', '-l', '\x1b[13;2u')
+
+
 def disable_prefix_bindings(settings):
     """Disable tmux command prefixes in this run's private server only."""
     session = settings['session']
@@ -594,6 +599,7 @@ def launch_session(args, state, settings, output):
         tmux('set-option', '-w', '-t', target, 'remain-on-exit-format', '')
         install_status(settings)
         disable_prefix_bindings(settings)
+        install_input_bindings()
         install_scrolling(settings)
         tmux('select-pane', '-t', main)
         pane_process = process_identity(int(tmux('display-message', '-p', '-t', main, '#{pane_pid}')))

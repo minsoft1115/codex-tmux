@@ -24,12 +24,14 @@ command -v python3 >/dev/null || { printf 'Python 3.11+ is required.\n' >&2; exi
 installer_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 python3 - "$installer_dir" "$prefix" "$bashrc" "$uninstall" <<'PY'
 import os
+import json
 from pathlib import Path
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 if sys.version_info < (3, 11):
     sys.exit('Python 3.11+ is required.')
@@ -80,6 +82,61 @@ def update_bashrc(content):
     print('For the current Bash session: source ' + shlex.quote(str(rc)))
 
 
+def configure_newline(content):
+    """Edit only the newline binding, preserving the rest of the TOML text."""
+    text = content.decode('utf-8')
+    parsed = tomllib.loads(text)
+
+    def editor(document):
+        return document.get('tui', {}).get('keymap', {}).get('editor', {})
+
+    previous = editor(parsed).get('insert_newline', ['ctrl-j', 'ctrl-m', 'enter'])
+    if isinstance(previous, str):
+        previous = [previous]
+    bindings = ['shift-enter'] + [key for key in previous
+                                  if key.lower() not in ('shift-enter', 'alt-enter')]
+    if editor(parsed).get('insert_newline') == bindings:
+        return content
+    encoded = json.dumps(bindings)
+    lines = text.splitlines(keepends=True)
+    last_complete = 0
+    section_end = None
+    replacement = None
+    # A valid prefix ends at a TOML statement boundary, including multiline
+    # arrays/strings. This avoids mistaking text inside strings for settings.
+    for end in range(1, len(lines) + 1):
+        try:
+            prefix = tomllib.loads(''.join(lines[:end]))
+        except tomllib.TOMLDecodeError:
+            continue
+        statement = ''.join(lines[last_complete:end])
+        if 'insert_newline' in editor(prefix):
+            lhs, separator, rhs = statement.partition('=')
+            if not separator or tomllib.loads('value = ' + rhs)['value'] != editor(prefix)['insert_newline']:
+                raise ValueError('Cannot safely edit an inline newline keymap; use [tui.keymap.editor].')
+            replacement = ''.join(lines[:last_complete]) + lhs + '= ' + encoded + '\n' + ''.join(lines[end:])
+            break
+        if statement.lstrip().startswith('['):
+            try:
+                if tomllib.loads(statement) == {'tui': {'keymap': {'editor': {}}}}:
+                    section_end = end
+            except tomllib.TOMLDecodeError:
+                pass
+        last_complete = end
+    if replacement is None:
+        assignment = 'insert_newline = ' + encoded + '\n'
+        if section_end is not None:
+            before = ''.join(lines[:section_end])
+            replacement = before.rstrip('\n') + '\n' + assignment + ''.join(lines[section_end:])
+        else:
+            replacement = text.rstrip('\n') + '\n\n[tui.keymap.editor]\n' + assignment
+    expected = parsed
+    expected.setdefault('tui', {}).setdefault('keymap', {}).setdefault('editor', {})['insert_newline'] = bindings
+    if tomllib.loads(replacement) != expected:
+        raise ValueError('Could not preserve existing Codex settings while updating the newline key.')
+    return replacement.encode('utf-8')
+
+
 original = rc.read_bytes() if rc.exists() else b''
 base_rc = without_managed_alias(original)
 if sys.argv[4] == '1':
@@ -116,6 +173,13 @@ if sys.argv[4] == '1':
     print(f'Uninstalled: {command}')
     sys.exit(0)
 
+codex_config = Path(os.environ.get('CODEX_HOME') or '~/.codex').expanduser().resolve() / 'config.toml'
+codex_original = codex_config.read_bytes() if codex_config.exists() else b''
+try:
+    codex_updated = configure_newline(codex_original)
+except (ValueError, TypeError, AttributeError) as error:
+    sys.exit(f'Cannot update {codex_config}: {error}; no changes made.')
+
 files = {name: (project / name).read_bytes() for name in ('codex_tmux.py', 'usage.py', 'install.sh')}
 wrapper = ('#!/bin/sh\n' + marker + '\n'
            'if [ "$#" -eq 1 ] && [ "$1" = --uninstall ]; then\n'
@@ -137,6 +201,15 @@ updated = (base_rc + (b'\n' if base_rc and not base_rc.endswith(b'\n') else b'')
 if updated != original:
     # Validate before installing or changing the user's shell configuration.
     subprocess.run(['bash', '-n'], input=updated, check=True)
+if codex_updated != codex_original:
+    codex_config.parent.mkdir(parents=True, exist_ok=True)
+    if codex_config.exists():
+        with tempfile.NamedTemporaryFile(dir=codex_config.parent, prefix='config.toml.codex-tmux-', suffix='.bak', delete=False) as backup:
+            backup.write(codex_original)
+        print(f'Codex config backup: {backup.name}')
+    write_atomic(codex_config, codex_updated,
+                 codex_config.stat().st_mode & 0o777 if codex_config.exists() else 0o600)
+    print(f'Configured Shift+Enter for Codex newlines: {codex_config}')
 for name, content in files.items():
     write_atomic(app / name, content, 0o644)
 write_atomic(command, wrapper, 0o755)

@@ -4,6 +4,7 @@ import shlex
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 import unittest
 
 
@@ -37,9 +38,11 @@ exit 2
         curl.chmod(0o755)
         self.env = dict(os.environ, PATH=f'{self.bin}:{os.environ["PATH"]}',
                         TMPDIR=str(self.downloads), FIXTURE_ARCHIVE=str(self.archive),
-                        CURL_ARGUMENTS=str(self.root / 'curl-arguments'), CODEX_TMUX_REF='main')
+                        CURL_ARGUMENTS=str(self.root / 'curl-arguments'), CODEX_TMUX_REF='main',
+                        CODEX_HOME=str(self.root / 'codex-home'))
         self.prefix = self.root / 'install with spaces'
         self.rc = self.root / 'test.bashrc'
+        self.config = Path(self.env['CODEX_HOME']) / 'config.toml'
 
     def install(self, *extra):
         # Feed the script through stdin exactly as curl | bash would.
@@ -74,6 +77,48 @@ exit 2
         return subprocess.run(
             ['bash', str(PROJECT / 'install.sh'), '--uninstall', '--prefix', str(self.prefix), '--bashrc', str(self.rc)],
             text=True, capture_output=True, env=self.env)
+
+    def test_newline_keymap_preserves_settings_and_reinstall_is_idempotent(self):
+        originals = [
+            '# keep\nmodel = "example"\n',
+            '[tui.keymap.editor]\n# keep\nmove_left = "ctrl-b"\n',
+            '[tui.keymap.editor]\ninsert_newline = [\n "alt-enter",\n "ctrl-j",\n]\nmove_left = "ctrl-b"\n',
+            'tui.keymap.editor.insert_newline = "alt-enter"\n# keep\nmodel = "example"\n',
+            'note = """\n[tui.keymap.editor]\ninsert_newline = "fake"\n"""\n',
+        ]
+        self.config.parent.mkdir()
+        for original in originals:
+            with self.subTest(original=original):
+                self.config.write_text(original)
+                result = self.install()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                installed = self.config.read_bytes()
+                parsed = tomllib.loads(installed.decode())
+                bindings = parsed['tui']['keymap']['editor'].pop('insert_newline')
+                self.assertEqual(bindings[0], 'shift-enter')
+                self.assertNotIn('alt-enter', bindings)
+                expected = tomllib.loads(original)
+                editor = expected.setdefault('tui', {}).setdefault('keymap', {}).setdefault('editor', {})
+                editor.pop('insert_newline', None)
+                self.assertEqual(parsed, expected)
+                backups = list(self.config.parent.glob('config.toml.codex-tmux-*.bak'))
+                self.assertTrue(any(path.read_text() == original for path in backups))
+                self.assertEqual(self.install().returncode, 0)
+                self.assertEqual(self.config.read_bytes(), installed)
+                self.assertEqual(list(self.config.parent.glob('config.toml.codex-tmux-*.bak')), backups)
+        self.assertEqual(self.uninstall().returncode, 0)
+        self.assertEqual(self.config.read_bytes(), installed)
+
+    def test_invalid_codex_config_does_not_change_installation(self):
+        self.config.parent.mkdir()
+        original = '[tui\n'
+        self.config.write_text(original)
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('no changes made', result.stderr)
+        self.assertEqual(self.config.read_text(), original)
+        self.assertFalse(self.prefix.exists())
+        self.assertFalse(self.rc.exists())
 
     def test_alias_forwards_to_real_codex_without_recursion(self):
         import json
